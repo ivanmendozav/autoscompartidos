@@ -1,0 +1,252 @@
+---
+title: "Trip Conversion data.table"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+## Importación datos mensuales
+
+```{r install-libraries, warning=FALSE, message=FALSE, error=FALSE, echo=FALSE}
+if (!requireNamespace("data.table", quietly = TRUE)) {
+  install.packages("data.table")
+}
+if (!requireNamespace("digest", quietly = TRUE)) {
+  install.packages("digest")
+}
+if (!requireNamespace("kableExtra", quietly = TRUE)) {
+  install.packages("kableExtra")
+}
+```
+
+Cargamos librerías necesarias, incluyendo data.table para trabajar con muchos datos en memoria.
+
+```{r load-libraries, warning=FALSE, message=FALSE, error=FALSE}
+library(data.table)
+library(digest)
+library(kableExtra)
+library(glue)
+library(ggplot2)
+```
+
+Archivo de consulta de todo el mes de marzo con puntos GPS de recorridos de estudiantes. Las variables que se importan son la fecha-hora de la coordenada, el usuario rastrado, y las coordenadas en latitud, longitud y altitud. Se muestran número de usuarios, observaciones y variables.
+
+```{r}
+#| label: import-data
+#| layout-ncol: 2
+#| cache: true
+
+# Tiempo de inicio
+tiempo_inicio <- Sys.time()
+filename <- "queryjunio2024.csv"
+output <- "tripsjunio2024.csv"
+
+# Cargar CSV a data.table
+dt.points <- fread(filename, 
+                   colClasses = c("POSIXct", "character", "numeric", 
+                                  "numeric", "numeric"))
+
+# Ordenar data.table por usuario y fecha de registro
+dt.points <- dt.points[order(company_token, recorded_at)]
+
+# Renombrar columnas
+setnames(dt.points, c("Datetime","RealUser","Latitude","Longitude","Altitude"))
+
+# Ocultar identidad de usuarios
+to.MD5 <- function(dt){
+  # Transformar a MD5 usuarios unicos
+  unique.users <- unique(dt[,RealUser])
+  unique.md5 <- sapply(unique.users, digest, algo = "md5")
+  dt.hashes <- data.table(RealUser = unique.users, User = unique.md5)
+  # Copiar en dataset original
+  dt.join <- merge(dt, dt.hashes, by="RealUser", all.x = TRUE)
+  dt.join[, RealUser := NULL]
+  return (dt.join)
+} 
+dt.points <- to.MD5(dt.points)
+
+# Funcion para mostrar métricas
+Show.Metrics <- function(dt, label){
+  n.users <- length(unique(dt[,User]))
+  n.points <- nrow(dt)
+  summary <- data.table(Statistic=c("Users","Points"), Value=c(n.users, n.points))
+  kable(summary, caption="Statistics of dataset.", label = label)
+} 
+Show.Metrics(dt.points, label = "table-statistics")
+
+# Mostramos estructura del dataset y métricas
+summary <- data.table(Variable=names(dt.points), Description=c(
+  "Date time in 24-h format",
+  "y Coord","x Coord","z Coord", "Masked unique identifier of user"))
+kable(summary, caption="Variables in dataset.", label = "table-variables")
+```
+
+Filtramos usuarios con pocos registros por no tener suficientes puntos que puedan permitir averiguar su historial de viajes.
+
+```{r}
+#| label: filter-data
+#| layout-ncol: 1
+#| fig-cap: Histograma de Puntos por Usuario
+
+# Reporte de puntos agrupados por usuario
+dt.users <- dt.points[,.(points = .N),by=User][order(-points)]
+
+# Mostrar histograma de puntos por usuario
+dt.users %>% ggplot(aes(x=points)) + geom_histogram(bins=30)
+
+# Juntar tablas por usuario
+dt.join <- merge(dt.points, dt.users, by="User", all.x = TRUE)
+
+# Eliminar registros de usuarios con pocos puntos
+min.points <- 20
+dt.points <- dt.join[points>min.points]
+dt.points[,points:=NULL]
+
+# Mostrar nuevas metricas
+Show.Metrics(dt.points, label = "table-filtered")
+
+# Liberar memoria
+rm(dt.join)
+rm(dt.users)
+rm(summary)
+out <- gc(verbose = FALSE)
+```
+
+Cálculo de velocidades instantáneas pasando las coordenadas a cartesianas para el cómputo de distancias, y las fechas a segundos para el cómputo de intervalos de tiempo entre puntos consecutivos.
+
+```{r}
+#| label: speeds-calc
+#| layout-ncol: 1
+
+# Función para calcular la distancia entre dos puntos geográficos en km 
+# dados su latitud y longitud
+haversine_distance <- function(lat1, lon1, lat2, lon2) {
+    # Radio de la Tierra en kilómetros
+    R <- 6371
+    
+    # Convertir las latitudes y longitudes de grados a radianes
+    lat1 <- lat1 * pi / 180
+    lon1 <- lon1 * pi / 180
+    lat2 <- lat2 * pi / 180
+    lon2 <- lon2 * pi / 180
+    
+    # Diferencias entre las latitudes y longitudes
+    dlat <- lat2 - lat1
+    dlon <- lon2 - lon1
+    
+    # Calcular la distancia usando la fórmula del haversine
+    a <- sin(dlat/2)^2 + cos(lat1) * cos(lat2) * sin(dlon/2)^2
+    c <- 2 * atan2(sqrt(a), sqrt(1-a))
+    distance <- R * c
+    return(distance)
+}
+
+# Agregar coordenadas origen y destino
+dt.points[, next_latitude := shift(Latitude, type = "lead")]
+dt.points[, next_longitude := shift(Longitude, type = "lead")]
+
+# Calcular distancias consecutivas
+dt.points[,distance := haversine_distance(
+    Latitude, Longitude,
+    next_latitude, next_longitude
+)]
+
+# Agregar fechas origen y destino
+dt.points[, next_date := shift(Datetime, type = "lead")]
+
+# Calcular intervalo de tiempo en horas entre puntos consecutivos
+dt.points[,interval := (as.numeric(next_date) - as.numeric(Datetime))/3600]
+dt.points <- dt.points[interval > 0]
+dt.points[,speed := distance/interval]
+
+# Filtramos registros con velocidad cero o infinita
+setnafill(dt.points, fill = 0, cols=c("speed"))
+dt.points <- dt.points[speed > 0 & speed < 200]
+
+# Mostramos resultados
+dt.points[,next_latitude := NULL]
+dt.points[,next_longitude := NULL]
+dt.points[,next_date := NULL]
+kable(head(dt.points[,-"User"]), label="table-speeds", 
+      caption="Instant speeds computations")
+
+# Mostramos histograma de velocidades
+dt.points[,id := 1:nrow(dt.points)]
+dt.points %>% ggplot(aes(x=speed)) + geom_histogram(bins=10, na.rm = TRUE)
+
+# Liberamos memoria
+out <- gc(verbose = FALSE)
+```
+
+Segmentar puntos en viajes a partir de umbral de velocidad
+
+```{r}
+#| label: segments-calc
+#| layout-ncol: 2
+#| cache: true
+
+# Usuarios con mayor cantidad de puntos
+sample.users <- dt.points[, .(.N), by=User][order(-N)]
+kable(head(sample.users), caption="Users per collected data points", label="table-users")
+
+# IDs de Puntos sin movimiento
+max.speed <- 2
+stops <- dt.points[speed < max.speed, id]
+
+# Segmentar puntos en cada parada
+dt.points[, bin := cut(id, breaks = stops, labels = FALSE, 
+                         include.lowest = TRUE)]
+dt.points <- na.omit(dt.points)
+
+# Filtrar viajes cortos
+min.points <- 3
+points.per.trips <- dt.points[, .(.N), by=bin]
+dt.points <- merge(dt.points, points.per.trips, all.x = TRUE, by="bin")
+dt.points <- dt.points[N > min.points]
+dt.points[,N := NULL]
+
+# Agregamos puntos en viajes
+dt.trips <- dt.points[,.(.N, departure = min(Datetime), 
+                  arrival = max(Datetime),
+                  origin.Latitude = first(Latitude), 
+                  origin.Longitude = first(Longitude),
+                  origin.Altitude = first(Altitude), 
+                  destination.Latitude = last(Latitude),           
+                  destination.Longitude = last(Longitude), 
+                  destination.Altitude = last(Altitude),
+                  tot.time = sum(interval), 
+                  tot.distance = sum(distance)), by=.(User,bin)]
+
+# Eliminar filas entre usuarios
+min.time <- 0.0833 # 5 minutes
+min.distance <- 0.05 # 50 meters
+dt.trips[,nextUser := shift(User, type="lead")]
+dt.trips <- dt.trips[User == nextUser]
+
+# Filtrar por distancias y tiempos de viaje
+dt.trips <- dt.trips[tot.time > min.time & tot.distance > min.distance]
+
+# Mostrar estadisticas
+n.trips <- nrow(dt.trips)
+n.users <- length(unique(dt.trips[,User]))
+summary <- data.table(Statistic=c("Users","Trips"), Value=c(n.users, n.trips))
+kable(summary, caption="Statistics of trips", label =  "table-trips")
+
+# Liberar memoria
+rm(points.per.trips)
+out <- gc(verbose = FALSE)
+
+# Escribir archivo de viajes
+dt.trips[,nextUser := NULL]
+dt.trips %>% rename(tripID = bin) -> dt.trips
+fwrite(dt.trips, output, row.names = FALSE)
+
+# Escribir archivo de puntos actualizado con hash de usuario e ID de viaje
+fwrite(dt.points, paste("hash",filename), row.names = FALSE)
+
+# Mostrar tiempo del algoritmo
+tiempo_fin <- Sys.time()
+diferencia_tiempo <- as.numeric(tiempo_fin - tiempo_inicio, units = "secs")
+print(glue("Tiempo total de ejecucion {diferencia_tiempo}."))
+```

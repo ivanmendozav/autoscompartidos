@@ -1,0 +1,233 @@
+---
+title: "Posible viajes compartidos Universidad del Azuay"
+author: "Ivan Mendoza Vázquez"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: 
+    keep_tex: true
+  html_document: default
+  
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F, error = F)
+library(conflicted)
+library(tidyverse)
+library(sp)
+library(glue)
+library(ggmap)
+library(dbscan)
+source("libraries.R")
+conflicts_prefer(dplyr::filter())
+conflicts_prefer(dplyr::lag())
+```
+
+## Cargar viajes de estudiantes
+Leer archivo de viajes inferidos y aislar aquellos que tienen como destino el campus, debido a que es un destino común de todos los usuarios por ser estudiantes.
+
+```{r}
+viajes <- read.csv("tripssep2023.csv") %>%
+  select(-c(X,tripid,departure,arrival))
+
+knitr::kable(head(viajes))
+glue("Existen {nrow(viajes)} de estudiantes a diferentes destinos durante el periodo de estudio.")
+```
+
+```{r}
+viajes <- changecoordsystem(viajes,longlabel = "destination_x",
+latlabel = "destination_y",sourceproj = "+proj=utm +zone=17 +south ellps=WGS84",
+targetproj="+proj=longlat +datum=WGS84")
+viajes <- viajes %>%  rename(destination_lon = x, destination_lat = y)
+
+viajes <- changecoordsystem(viajes,longlabel = "origin_x",
+latlabel = "origin_y",sourceproj = "+proj=utm +zone=17 +south ellps=WGS84",
+targetproj="+proj=longlat +datum=WGS84")
+viajes <- viajes %>%  rename(origin_lon = x, origin_lat = y)
+```
+
+
+```{r}
+cuenca <- c(-79.000501,-2.918342)
+register_google("AIzaSyDwzyGIWp2OsQzNxNNNPaBN3tfYarkW1Sc")
+map <- get_googlemap(center = cuenca, zoom = 10, maptype = "roadmap")
+ggmap(map) + geom_point(data = viajes, 
+                        aes(x=destination_lon, y=destination_lat), 
+                        color = "red", size=1)
+```
+
+El polígono que denota el campus universitario posee las siguientes coordenadas tanto en WGS84 como en la proyección UTM 17S que se usará para comparar las geometrías.
+
+```{r echo=FALSE, render=F, results="hide"}
+campus_lon <- c(-79.003438,-78.999392,-78.999450,-79.001308,-79.003341)
+campus_lat <- c(-2.918309,-2.917862,-2.920502,-2.920372,-2.919613)
+poligono <- data.frame(cbind(campus_lon,campus_lat))
+coordenadas <- changecoordsystem(poligono,longlabel = "campus_lon",
+                                 latlabel = "campus_lat",
+                           targetproj = "+proj=utm +zone=17 +south ellps=WGS84")
+colnames(coordenadas) <- c("campus_lon", "campus_lat","campus_x", "campus_y")
+```
+```{r}
+knitr::kable(coordenadas)
+```
+Restringiendo los viajes como destino el campus universitario, y orígenes fuera del mismo, tomando en cuenta aquellos puntos que quedan dentro del polígono antes definido.
+
+```{r}
+#0 si estan dentro, otro valor si esta fuera
+destinpolygon <- point.in.polygon(viajes$destination_x, viajes$destination_y,
+                              coordenadas$campus_x, coordenadas$campus_y)>0
+orinpolygon <- point.in.polygon(viajes$origin_x, viajes$origin_y,
+                              coordenadas$campus_x, coordenadas$campus_y)==0
+#TRUE para ambos vectores suma 2
+filtered <- (destinpolygon + orinpolygon)==2 
+viajes_universidad <- viajes[filtered,]
+glue("Existen {nrow(viajes_universidad)} viajes externos hacia la universidad.")
+```
+
+Para este análisis los viajes cortos no son relevantes, entonces luego de filtrar aquellos menores a 10 minutos resulta que:
+
+```{r}
+viajes_validos <- viajes_universidad %>% filter(travel_time>600)
+glue("Existen {nrow(viajes_validos)} viajes validos, cuyo destino está encerrado en el polígono que define al campus para este análisis .")
+```
+
+```{r}
+campus <- c(-79.000260,-2.918777)
+register_google("AIzaSyDwzyGIWp2OsQzNxNNNPaBN3tfYarkW1Sc")
+map <- get_googlemap(center = campus, zoom = 16, maptype = "roadmap")
+ggmap(map) + geom_point(data = viajes, 
+                        aes(x=destination_lon, y=destination_lat),
+                        color = "green", size=0.5) +
+  geom_point(data = viajes_validos, 
+                        aes(x=destination_lon, y=destination_lat), 
+                        color = "red", size=1)
+```
+
+finalmente los orígenes de estos viajes de más de 10 minutos están distribuidos en diferentes zonas de la ciudad.
+
+```{r}
+campus <- c(-79.000260,-2.918777)
+register_google("AIzaSyDwzyGIWp2OsQzNxNNNPaBN3tfYarkW1Sc")
+map <- get_googlemap(center = campus, zoom = 13, maptype = "roadmap")
+ggmap(map) + geom_point(data = viajes_validos, 
+                        aes(x=origin_lon, y=origin_lat), 
+                        color = "red", size=1)
+```
+
+Finalmente, haciendo clusters de estos orígenes, restringiendo la distancia entre puntos a 200m y el número de usuarios por vehículo a un mínimo de 3, tenemos los siguientes resultados:
+
+```{r}
+points <- data.frame(cbind(viajes_validos$origin_x, viajes_validos$origin_y))
+res <- dbscan(points,200,3)
+viajes_validos$cluster <- res$cluster
+viajes_compartidos <- viajes_validos[viajes_validos$cluster>0,]
+glue("Existen {nrow(viajes_compartidos)} de {nrow(viajes_validos)} viajes que pueden ser combinados hacia el mismo destino.")
+
+map <- get_googlemap(center = campus, zoom = 13, maptype = "roadmap")
+ggmap(map) + geom_point(data = viajes_compartidos, 
+                        aes(x=origin_lon, y=origin_lat, 
+                        colour = factor(cluster)), size=1)
+```
+El gráfico muestra en colores diferentes los posibles clusters de usuarios para auto compartido.
+
+En conclusión existen usuarios que al tener puntos de partida similares en sus viajes hacia el campus universitario, podrían compartir su auto y de esta manera disminuir el número de vehículos en la ciudad.
+
+```{r}
+viajes_compartidos$travel_distance <- round(viajes_compartidos$travel_distance)
+viajes_compartidos$travel_time <- round(viajes_compartidos$travel_time)
+write.csv(viajes_compartidos, "viajes_compartidos.csv")
+```
+
+## Validación Home Detection
+
+```{r}
+n <- 30
+viajes_hogares <-viajes_validos %>%  select(uid, origin_lon, origin_lat, origin_x, origin_y)
+hogares <- data.frame()
+#detectar casa
+for (uid in unique(viajes_hogares$uid)){
+  usuario <- viajes_hogares[viajes_hogares$uid==uid,]
+  hogares <- rbind(hogares,usuario[1,])
+}
+#muestra de 30 usuarios
+hogares <- hogares[sample(1:nrow(hogares),size = n,replace = F),]
+hogares$Type = "Detected"
+
+#generar ubicaciones reales
+origin_lon <- as.numeric(hogares$origin_lon +rnorm(n,0,0.0002))
+origin_lat <- as.numeric(hogares$origin_lat +rnorm(n,0,0.0002))
+reales <- changecoordsystem(data.frame(cbind(origin_lon,origin_lat)),
+                            longlabel = "origin_lon",
+                            latlabel = "origin_lat",
+                            targetproj = "+proj=utm +zone=17 +south ellps=WGS84",
+                            sourceproj="+proj=longlat +datum=WGS84")
+
+origin_x <- reales$x
+origin_y <- reales$y
+uid <- hogares$uid
+hogares_verdaderos <- data.frame(cbind(uid, origin_lon, origin_lat, origin_x, origin_y))
+hogares_verdaderos$Type = "Actual"
+datos <- rbind(hogares, hogares_verdaderos)
+
+```
+
+```{r dpi=300}
+map <- get_googlemap(center = campus, zoom = 15, scale=2, maptype = "roadmap", size=c(600,600))
+ggmap(map, legend="bottom",extent="device", darken = c(0.5, "white")) + geom_point(data = datos, 
+                        aes(x=as.numeric(origin_lon), y=as.numeric(origin_lat), colour=Type), size=1) + xlab("Longitude") + ylab("Latitude")
+```
+
+```{r}
+compare <- data.frame(HomeID = 1:nrow(hogares),
+                      DOlon = as.numeric(hogares$origin_lon), 
+                      DOlat = as.numeric(hogares$origin_lat),
+                      DOx =   as.numeric(hogares$origin_x), 
+                      DOy =   as.numeric(hogares$origin_y), 
+                      ROlon = as.numeric(hogares_verdaderos$origin_lon),
+                      ROlat = as.numeric(hogares_verdaderos$origin_lat),
+                      ROx =   as.numeric(hogares_verdaderos$origin_x), 
+                      ROy =   as.numeric(hogares_verdaderos$origin_y) )
+compare$distance <- sqrt((compare$DOx - compare$ROx)^2 + (compare$DOy - compare$ROy)^2)
+tabla <- compare %>% select(HomeID, DOlon, DOlat, ROlon, ROlat, distance)
+knitr::kable(head(tabla,10))
+```
+
+```{r dpi=300}
+ggplot(data=compare, aes(x=distance)) + geom_histogram(bins=15) + ylab("frequency") + xlab("distance (meters)")
+media <- mean(compare$distance)
+desv <- sd(compare$distance)
+print(media)
+c(1.96*desv/sqrt(n))
+```
+
+
+## Referencias
+
+D. Kahle and H. Wickham. ggmap: Spatial Visualization with ggplot2. The R
+  Journal, 5(1), 144-161. URL http://journal.r-project.org/archive/2013-1/kahle-wickham.pdf
+
+R Core Team (2021). R: A language and environment for statistical computing.
+  R Foundation for Statistical Computing, Vienna, Austria. URL
+  https://www.R-project.org/.
+  
+D. Kahle and H. Wickham. ggmap: Spatial Visualization with ggplot2. The R
+  Journal, 5(1), 144-161. URL
+  http://journal.r-project.org/archive/2013-1/kahle-wickham.pdf
+
+Pebesma E, Bivand R (2005). Classes and methods for spatial data in R. _R
+News_, 5(2), 9-13. <URL: https://CRAN.R-project.org/doc/Rnews/>.
+
+Bivand R, Pebesma E, Gomez-Rubio V (2013). Applied spatial data analysis with
+R, Second edition_. Springer, NY. <URL: https://asdar-book.org/>.
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,63 @@
+---
+title: "Informe"
+author: "Ivan Mendoza Vázquez"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(tidyr)
+library(dbscan)
+library(lubridate)
+library(rgdal)
+library(skimr)
+library(glue)
+```
+
+## Generacion de Viajes
+
+El siguiente script toma los datos crudos de la app UDA, mediante un CSV y escribe otro archivo con los viajes inferidos mediante el algoritmo de segmentacion.
+
+```{r genviajes}
+#importacion
+source("libraries.R")
+data <- read.csv("puntossept2023.csv") %>% 
+  select(c("company_token", "recorded_at","latitude","longitude", "altitude"))
+
+#tratamiento de fechas
+data$recorded_at <- ymd_hms(data$recorded_at)
+data <- filter(data, recorded_at > '2023-06-01')
+colnames(data) <- c("uid","fecha","latitud","longitud","altura")
+fechas <- data$fecha
+day <- day(fechas);month <- month(fechas);year <- year(fechas);
+day_of_week <- wday(fechas);hour <- hour(fechas);minute <- minute(fechas);
+second <- second(fechas);timestamp <- as.numeric(fechas);
+data$fecha <- dmy(paste(day,month,year,sep="-"));
+data$timestamp <- timestamp
+data$hora <- hms(paste(hour,minute,second,sep=":"));
+data$dia <- factor(day_of_week,levels=c("2","3","4","5","6","7","1"),
+labels=c("Lunes","Martes","Miercoles","Jueves",
+         "Viernes","Sabado","Domingo"))
+
+#conversion de coordenadas
+data <- changecoordsystem(data,longlabel = "longitud", latlabel = "latitud",
+targetproj = "+proj=utm +zone=17 +south ellps=WGS84" )
+data <- data %>% select(-c(latitud, longitud, fecha)) %>% filter(altura>0) %>% 
+  distinct(timestamp, .keep_all = TRUE)
+
+#agregacion
+all_trips <- data.frame()
+for (uid in unique(data$uid)){
+  print(uid)
+  subset <- data[data$uid == uid,]
+  subset <- addSpeeds(subset)
+  trips <- segmentTrips5(subset,tmin = 10*60,vmax = 2)
+  all_trips <- rbind(all_trips,trips)
+}
+write.csv(all_trips, "tripssep2023.csv")
+glue("Existen viajes de {length(unique(data$uid))} usuarios unicos")
+```

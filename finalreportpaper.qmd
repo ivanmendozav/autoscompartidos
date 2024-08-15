@@ -1,0 +1,497 @@
+---
+title: "Exploring Mobility Data to Identify Transportation Hubs for travels to University Campuses"
+lang: en
+date: ""
+format: 
+  jasa-pdf: 
+    keep-tex: true
+  jasa-html: default
+editor: visual
+author:
+  - name: I. Mendoza
+    acknowledgements: | 
+      The authors gratefully acknowledge University of Azuay, Faculty of Science and Technology, the Research Department and its Statistics Center Department.
+    affiliations:
+      - name: University of Azuay
+        department: Statistics Center Department
+  - name: A. Baquero
+    affiliations:
+      - name: University of Azuay
+        department: Science and Technology
+  - name: G. Alvarez
+    affiliations:
+      - name: University of Azuay
+        department: Science and Technology
+abstract: |
+  This study utilizes extensive mobility data to develop a method for identifying transportation hubs on university campuses. A mobile tracking application collected spatio-temporal data over four months, which was then analyzed using advanced data mining techniques to reveal patterns and identify key locations where students frequently change travel modes. The aim is to enhance student commutes by pinpointing critical intermodal transfer points for development or improvement. The findings offer valuable insights for university planners and city transportation authorities, enabling data-driven decisions to optimize transit infrastructure. By focusing on real-world usage patterns, the study ensures that the identified hubs meet the actual needs and behaviors of students, leading to a more efficient and effective campus transportation network and the design of specialized transportation services for students.
+keywords:
+  - datamining, clustering, traffic, college, big data
+echo: false
+warning: false
+message: false
+bibliography: references.bib
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#| label: load-libraries
+library(data.table)
+library(kableExtra)
+library(lubridate)
+library(ggplot2)
+library(glue)
+library(leaflet)
+library(leaflet.extras)
+library(dplyr)
+library(dbscan)
+library(htmlwidgets)
+library(webshot2)
+```
+
+## Introduction
+
+This study leverages large volumes of mobility data to propose a method for identifying transportation hubs on University campuses. A mobile tracking application is used to collect spatio-temporal data over a four-month period. This comprehensive dataset is analyzed using advanced data mining techniques to uncover hidden patterns and identify the actual hubs where students frequently change travel modes en route to campus. The goal is to enhance the efficiency and convenience of student commutes by pinpointing key locations that can be developed or improved to better serve as intermodal transfer points. The findings provide valuable insights for university planners and city transportation authorities, enabling them to make data-driven decisions to optimize transit infrastructure. By focusing on real-world usage patterns, this approach ensures that the identified hubs align closely with the actual needs and behaviors of students, ultimately contributing to a more streamlined and effective campus transportation network.
+
+## Methodology
+
+This section describes the techniques and procedures included in the data analysis to extract the potential transportation hubs from large databases. The following graph in @fig-methodology shows the main workflow.
+
+```{r}
+#| label: fig-methodology
+#| layout-ncol: 1
+#| fig-cap: Workflow of Methodology for Transportation Hubs Detection
+
+library(DiagrammeR)
+
+# Crear el gráfico con el código correcto
+graph <- DiagrammeR::grViz("
+  digraph LR {
+    A [label='Data Collection', shape=box, style='filled', fillcolor=none, color=black, penwidth=3]
+    B [label='Data Filtering', shape=box, style='filled', fillcolor=none, color=black, penwidth=3]
+    C [label='Trips Mining', shape=box, style='filled', fillcolor=none, color=black, penwidth=3]
+    D [label='Arrival Time Analysis', shape=ellipse, style='filled', fillcolor=none, color=black, penwidth=3]
+    E [label='Origin Location Analysis', shape=ellipse, style='filled', fillcolor=none, color=black, penwidth=3]
+    F [label='Spatial Clustering', shape=box, style='filled', fillcolor=none, color=black, penwidth=3]
+    G [label='Service Planning', shape=ellipse, style='filled', fillcolor=none, color=black, penwidth=3]
+
+    A -> B [label='  Student Trips']
+    B -> C [label='  Trips to Campus']
+    C -> D 
+    C -> E 
+    D -> F [label='Arrival Patterns']
+    E -> F [label=' Origin Patterns']
+    F -> G [label='  Transportation Hubs']
+  }
+")
+
+# Condicional para verificar si se está generando LaTeX
+if (knitr::is_latex_output()) {
+  # Guardar el widget como archivo HTML temporal
+  saveWidget(graph, "diagram.html", selfcontained = TRUE)
+  
+  # Tomar captura y guardar como PNG
+  webshot("diagram.html", file = "diagram.png", vwidth = 1000, vheight = 500)
+}
+# Mostrar el mapa
+if (knitr::is_html_output()) {
+  graph
+}
+```
+
+### Data Collection
+
+The data for this study will be collected through a life-logging application installed by students on their personal devices. This application leverages the operating system's location services to acquire the user's current location via GPS hardware. As a result, each observation in the dataset includes geospatial coordinates—typically latitude, longitude, and altitude—along with corresponding datetime information and an associated accuracy measure. Given the size of the student population at universities, the resulting database with all student trips is expected to be substantial, necessitating the use of a centralized remote server for permanent data storage. Consequently, continuous communication between the user's device and the server is required. This process demands careful management, as data loss can occur if connections are interrupted. Additionally, prolonged use of location services may lead to significant battery drain on the device, and stringent measures must be implemented to ensure that all data remains anonymous to protect user privacy.
+
+### Data Filtering
+
+To isolate patterns specific to the University Campus, the database must retain only records where the destination is within the Campus location. Specifically, the final point of a trip must fall within a predefined vicinity of the Campus. Additionally, the entire route of the trip should be contained within the designated urban area, with optional filters applied for maximum trip length or duration.
+
+### Trips Mining
+
+Once trips to the Campus have been identified, two processes are conducted: the detection of trip origins and their corresponding arrival times. These processes provide insights about recurrent regions from which trips originate, as well as the days and times when these trips occur. Such knowledge enables the identification of the most relevant patterns.
+
+### Spatial Clustering
+
+Once trips are restricted to an arrival window of interest, a density based clustering on the assumed origins extract the common locations where students take their last trip to the Campus. Then, filtering home locations by paying attention to the configuration of clusters the potential transportation hubs are identified.
+
+### Service Planning
+
+Finally, with the locations of the most relevant hotspots within the urban area, some services could be designed by authorities to assist students with their trips.
+
+## Results and discussion
+
+### Dataset Description
+
+The studied dataset consists of all student displacements recorded between April and June 2024, this corresponds to an entire semester, collected using the location tracking services of a custom mobile app. Student identities are hidden and replaced by a unique identifier, they also need to explicitly accept to be tracked and to be part of the campaign. A snapshot of the data table is presented in @tbl-snapshot.
+
+```{r}
+#| label: code-trips
+
+tiempo_inicio <- Sys.time()
+files <- c("tripsmarzo2024.csv",
+           "tripsabril2024.csv",
+           "tripsmayo2024.csv",
+           "tripsjunio2024.csv")
+data <- rbindlist(lapply((files), fread))
+
+ntrips <- nrow(data)
+users <- data[,.(.N),by=User][order(-N)]
+nusers <- length(unique(users$User))
+days <- data[,.(.N),by=(date(departure))][order(-N)]
+ndays <- length(unique(days$date))
+
+```
+
+The sample consists of `r ntrips` trips in `r ndays` days made by `r nusers` students (out of a approx. population of 6,000). The data collection includes all data from March to June 2024.
+
+```{r}
+#| label: tbl-snapshot
+#| tbl-cap: "Snapshot of the collected data"
+#| tbl-align: center
+#| layout-ncol: 1
+
+kable(data %>% select(departure, origin.Latitude, origin.Longitude, tot.time, tot.distance) %>% head(5),
+      digits = 3)
+
+```
+
+This table only includes a few trip characteristics. The complete list of variables in the dataset, after processing the raw data of GPS points, have the following meaning @tbl-dataframe-description.
+
+| Variable Name         | Type               | Description                                                     |
+|------------------|------------------|------------------------------------|
+| User                  | Character secuence | Users's Unique identifier after masked with a MD5 algorithm.    |
+| ID                    | Character secuence | Trip's Unique identifier                                        |
+| N                     | Integer            | Number of aggregated tracking points to create the trip.        |
+| departure             | Date time          | Timestamp of the departure time. Format: "YYYY-MM-DD HH:MM:SS". |
+| arrival               | Date time          | Timestamp of the arrival time. Format: "YYYY-MM-DD HH:MM:SS".   |
+| origin.Latitude       | Real               | Latitude of the origin location.                                |
+| origin.Longitude      | Real               | Longitude of the origin location.                               |
+| destination.Latitude  | Real               | Latitude of the destination location.                           |
+| destination.Longitude | Real               | Longitude of the destination location.                          |
+| tot.time              | Integer            | Total travel time in hours.                                     |
+| tot.distance          | Real               | Total distance traveled in kilometers.                          |
+| weekday               | Character          | Day of the week when the travel occurred.                       |
+
+: Sample Dataset Description after processing procedure {#tbl-dataframe-description}
+
+In the plots observed in @fig-trips-per-day we can observe that most students produce less than 50 trips. Given the collection method, this can be explained by a user not allowing the app to track trips for long periods, or by turning off the location services in the mobile device by accident. Also, most trips occur in April, and some valleys appear reapetedly, given that displacements dicrease on weekends.
+
+Nevertheless, a still large sample of students produce enough displacements to draw conclusions about the transportation hubs they use.
+
+```{r}
+#| label: fig-trips-per-day
+#| layout-ncol: 1
+#| fig-cap: Distribution of trips per date and student
+#| fig-subcap: 
+#|  - "Histogram of trips per date"
+#|  - "Histogram of trips per student"
+#|  
+
+ggplot(users[N<1000], aes(x=N)) + geom_histogram(bins=10) +
+  labs(x="Trips per student", y="Students in database")
+
+ggplot(days[N>1000], aes(x=date, y=N)) + geom_line() +
+  labs(x="Date", y="Trips per day")
+```
+
+Trips during every week day are presented in @fig-wday, where some patterns start to appear regarding temporal aspects. This is an important fact for future analysis.
+
+```{r}
+#| label: fig-wday
+#| fig-cap: Histogram of trips during all week days
+
+data[,weekday := wday(arrival, label = TRUE)]
+
+ggplot(data[,.(weekday)], aes(x=weekday)) + geom_bar()
+
+```
+
+### Data Filtering
+
+Since we are only interested in trips to the University Campus, the destination coordinates of these are constrained to a known location. In order to avoid selecting points within an arbitrary polygon, agglomerative clustering is carried out starting from seeds that correspond to known buildings and parking slots inside the predefined region @schubert_dbscan_2017.
+
+```{r}
+#| label: fig-campus
+#| fig-cap: "Destination spots of trips to campus"
+#| fig-align: center
+
+# Datos solo hacia el campus
+tiempo_inicio <- Sys.time()
+min.lat <- -2.92084
+max.lat <- -2.91776
+min.lon <- -79.00350
+max.lon <- -78.99714
+
+# Puntos en poligono del campus
+campus.data <- data[between(destination.Latitude, 
+                            min.lat, max.lat) &
+                     between(destination.Longitude, 
+                             min.lon, max.lon),]
+
+# Descartar viajes dentro del campus (cortos o con origen en el campus)
+campus.data <- campus.data[!(between(origin.Latitude, 
+                                     min.lat, max.lat)) 
+              &  !(between(origin.Longitude, 
+                           min.lon, max.lon)),]
+
+# Clustering aglomerativo con dbscan usando centroide
+clust <- dbscan(campus.data[,.(destination.Latitude,
+                               destination.Longitude)],
+                              eps=0.00002, minPts = 5)
+
+campus.data[,cluster := factor(clust$cluster)] 
+campus.data <- campus.data[cluster!=0,]
+campus.data[,cluster := NULL]
+ntripscampus <- nrow(campus.data)
+
+map <- leaflet(data = campus.data) %>%
+  addTiles() %>%
+  addCircleMarkers(~destination.Longitude, ~destination.Latitude,
+                   color="red", fillOpacity = 0.5,radius = 2)
+
+if (knitr::is_latex_output()) {
+  saveWidget(map, "fig-campus.html", selfcontained = TRUE)
+  webshot("fig-campus.html", file = "fig-campus.png", 
+          vwidth = 1000, vheight = 500)
+}
+
+# Mostrar el mapa
+if (knitr::is_html_output()) {
+  map
+}
+```
+
+Showing only trips towards College campus in @fig-campus, the distribution per day of the week can be seen in @fig-campus-day and with respect to day time in @fig-campus-hour. This process reduce the number of trips to a `r round(ntripscampus/ntrips*100,2)`% of the initial dataset. More precisely, there here are `r ntripscampus` trips to the campus, most of the them occurring on Wednesdays and Tuesdays in two separate rush hours (6h00-7h00) and (15h00-14h00). As expected, weekends have only a few displacements.
+
+```{r}
+#| label: fig-campus-day
+#| fig-cap: "Pareto Plot for trips to campus per day"
+#| fig-align: center
+
+# Calcular las frecuencias
+frequency_table <- as.data.frame(table(campus.data$weekday))
+colnames(frequency_table) <- c("weekday", "count")
+
+# Ordenar y calcular las frecuencias acumuladas
+frequency_table <- frequency_table[order(-frequency_table$count), ]
+frequency_table$cumfreq <- cumsum(frequency_table$count)
+frequency_table$cumperc <- frequency_table$cumfreq / sum(frequency_table$count) * 100
+
+# Graficar barras, ojiva y puntos de corte
+frequency_table %>% ggplot(aes(x = reorder(weekday, -count), y = count)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_line(aes(y = cumfreq), group = 1, color = "red") +
+  geom_point(aes(y = cumfreq), color = "red") +
+  scale_y_continuous(
+    sec.axis = sec_axis(~ . / sum(frequency_table$count) * 100, name = "Cummulative Frecuency")
+  ) +
+  labs(
+    x = "Weekday",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+#| label: fig-campus-hour
+#| fig-cap: "Trips to campus per daytime"
+#| fig-align: center
+#| 
+# Distribucion por hora del dia (GMT-5) solo dias de estudio
+hourtime <- campus.data[,hour(arrival)-5] #GMT-5
+hourtime <- ifelse(hourtime<0, hourtime+24, hourtime)
+campus.data[,Hour := hourtime]
+vector <- c("dom","sáb")
+ggplot(campus.data[Hour>5 & !(weekday %in% vector) ,.(Hour)], 
+       aes(x=Hour)) + geom_bar()
+```
+
+### Arrival patterns
+
+Combining hour and weekday arrivals patterns to campus, the mosaic in @fig-day-hour, allows exhibiting the largest cluster of trips on Wednesdays between 6h00 and 7h00. Further analysis wil be constrained only to this window. although other clusters could be included furthermore.
+
+```{r}
+#| label: fig-day-hour
+#| fig-cap: "Contingecy table between Weekday and Day-hour trips to campus"
+#| fig-align: center
+#| 
+# Crear la tabla de contingencia
+wdata <- campus.data[Hour>5 & !(weekday %in% vector) ,]
+contingencia <- wdata %>% count(Hour, weekday)
+
+# Gráfico de mosaico
+ggplot(contingencia, aes(x = weekday, y = Hour, fill = n)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low = "white", high = "blue") +
+  labs(x = "Weekday",
+       y = "Hour",
+       fill = "Frequency") +
+  theme_minimal()
+```
+
+The inferrred origins of trips ocurring during this window, geographically constrained only to the studied urban area, are now presented in @fig-origins.
+
+```{r}
+#| label: fig-origins
+#| fig-cap: "Origins for trips to campus during most relevant time window"
+#| fig-align: center
+
+library(leaflet)
+
+# Datos en cluster mayor dentro del area urbana de 20km
+wgdata <- wdata[between(Hour,6,7) & weekday=="mié" 
+                & tot.distance<=20,]
+
+# Usuarios en hora pico
+nusuarios <- length(unique(wgdata$User))
+
+map <- leaflet(data = wgdata) %>%
+  addTiles() %>%
+  addCircleMarkers(~origin.Longitude, ~origin.Latitude, 
+                   fillOpacity = 0.5,radius = 2)
+
+if (knitr::is_latex_output()) {
+  saveWidget(map, "fig-origins.html", selfcontained = TRUE)
+  webshot("fig-origins.html", file = "fig-origins.png", 
+          vwidth = 1000, vheight = 500)
+}
+# Mostrar el mapa
+if (knitr::is_html_output()) {
+  map
+}
+```
+
+There are near to `r nusuarios` students making trips only in this constrained time window. The clusters of origins retrieved via hierarchical clustering, reports the following top ten hotspots, possibly containing some home locations that should be discarded and the potential transportation hubs. a review of home location algorithms can be found in @pappalardo_evaluation_2021.
+
+### Retrieving transportation hubs
+
+```{r}
+#| label: tbl-origins-clusters
+#| tbl-cap: "Clusters of origins for trips to campus during rush hour"
+#| tbl-align: center
+#| 
+# Clustering aglomerativo con dbscan usando centroide
+clust <- dbscan(wgdata[,.(origin.Latitude,
+                               origin.Longitude)],
+                              eps=0.001, minPts = 10)
+
+wgdata[,cluster := clust$cluster]
+
+# Cluster de usuarios para carpooling
+minusers <- 10
+nclusters <- 10
+pooldata <- wgdata[cluster!=0, .(.N, 
+                                 unique_users = uniqueN(User))
+       ,by=.(cluster)][unique_users>=minusers][order(-unique_users)]
+kable(pooldata, 
+      col.names = c("Cluster","Trips","Unique Students"))
+```
+
+These locations can be placed on a map of the studied urban area, then they have to be analyzed for potential hubs, defined as locations where users gather to travel to a single common destination. Selecting only those with large number of students in @fig-origins-clusters, home locations are discarded.
+
+```{r}
+#| label: fig-origins-clusters
+#| fig-cap: "View of clusters of origins for trips to campus during rush hour"
+#| fig-align: center
+# Solo top N clusters con mínimo de usuarios
+bdata <- wgdata %>% filter(cluster %in% pooldata[1:nclusters,
+                                                  cluster])
+# Definir punto medio campus
+clat <- (min.lat + max.lat)/2
+clng <- (min.lon + max.lon)/2
+end <- c(lat = clat, lng = clng) 
+
+# Colores para factor cluster
+pal <- colorFactor(topo.colors(length(unique(bdata$cluster))), bdata$cluster)
+
+map <- leaflet(data = bdata ) %>%
+  addTiles(options = tileOptions(opacity = 0.5)) %>%
+  addCircleMarkers(~origin.Longitude, ~origin.Latitude, 
+                   fillOpacity = 0.8,radius = 2, 
+                   stroke = TRUE,             # Habilitar el borde
+                    weight = 1,                # Grosor del borde
+                    opacity = 1,               # Opacidad del borde
+                   fillColor = ~pal(cluster), label=~cluster,
+                   color="black") %>% 
+  addMarkers(lng = end["lng"], lat = end["lat"], popup = "End: Campus Location")
+
+if (knitr::is_latex_output()) {
+  saveWidget(map, "map-origins-clusters.html", selfcontained = TRUE)
+  webshot("map-origins-clusters.html", 
+          file = "map-origins-clusters.png", 
+          vwidth = 1000, vheight = 500)
+}
+# Mostrar el mapa
+if (knitr::is_html_output()){
+  map
+}
+```
+
+### Identifying paths
+
+Finally, by analysing the map around these locations, it is possible to identify those that suggest a change in travel mode before the final trip to campus. They appear not inside buildings but on roads and sidewalks. The resulting path in @fig-path from collected data points from the largest hub to the campus suggests a potential congested section that should be treated as a prority for authorities.
+
+```{r}
+#| label: tbl-data-points
+
+files <- c("datasets/hash querymarzo2024.csv",
+           "datasets/hash queryabril2024.csv",
+           "datasets/hash querymayo2024.csv",
+           "datasets/hash queryjunio2024.csv")
+dt.points <- rbindlist(lapply((files), fread))
+```
+
+```{r}
+#| label: fig-path
+#| fig-cap: "Collected data points for trips between campus and largest transportation hub"
+#| fig-align: center
+#| 
+
+# Definir origen de viaje (desde cluster mas grande)
+ldata <- wgdata %>% filter(cluster %in% pooldata[1, cluster])
+start <- c(lat = mean(ldata$origin.Latitude), lng = mean(ldata$origin.Longitude)) 
+
+# Puntos de viajes desde este cluster
+# IMPORTANTE: Numero de viaje se reinicia por mes ( no es único)
+dt.points[,mes:=month(Datetime)]
+ldata[,mes:=month(departure)]
+result <- merge.data.table(dt.points,ldata,by.x=c("mes","bin"),by.y=c("mes","tripID"))
+
+# Crear un mapa y añadir una ruta
+map <- leaflet(result) %>%
+  addTiles(options = tileOptions(opacity = 0.5)) %>%
+  addCircleMarkers(~Longitude, ~Latitude, 
+                   fillOpacity = 0.8,radius = 2, 
+                   stroke = TRUE,             # Habilitar el borde
+                    weight = 1,                # Grosor del borde
+                    opacity = 1,               # Opacidad del borde
+                   color="black") %>% 
+  addMarkers(lng = start["lng"], lat = start["lat"], popup = "Start: Largest Hub") %>%
+  addMarkers(lng = end["lng"], lat = end["lat"], popup = "End: Campus Location")
+
+if (knitr::is_latex_output()) {
+  saveWidget(map, "map-path.html", selfcontained = TRUE)
+  webshot("map-path.html", 
+          file = "map-path.png", 
+          vwidth = 1000, vheight = 500)
+}
+# Mostrar el mapa
+if (knitr::is_html_output()){
+  map
+}
+```
+
+These data points coming from an extended dataset before trip segmentation is carried out as explained in @mendoza2018discovering, allows extracting all routes used by students when moving from the largest hub to the campus in the rush hour of the morning. Then several transportation solutions can be imagined to assist students when traveling.
+
+```{r}
+#| eval: false
+# Mostrar tiempo del algoritmo
+tiempo_fin <- Sys.time()
+diferencia_tiempo <- as.numeric(tiempo_fin - tiempo_inicio, units = "secs")
+print(glue("Tiempo total de ejecucion {diferencia_tiempo}."))
+```
+
+## Conclusions
+
+By focusing on real-world usage patterns, this approach ensures that the identified hubs align closely with the actual needs and behaviors of students, contributing to a more streamlined and effective campus transportation network and to the design of specialized transportation service for students.
